@@ -1,4 +1,4 @@
-from .dataset.collator_whisper import WhisperDPOCollator, default_audio_loader
+from .dataset.collator_dpo import WhisperDPOCollator, default_audio_loader
 from .dataset.triplet_dataset import PreferenceTripletDataset
 from .modeling import (
     WhisperDPOTrainer,

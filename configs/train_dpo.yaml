@@ -2,6 +2,8 @@ model_name: openai/whisper-tiny
 train_dataset: data/dpo_triplets/zeroth_train.jsonl
 eval_dataset: data/dpo_triplets/zeroth_test.jsonl
 output_dir: outputs/dpo/1021/whisper_tiny_zeroth
+language: ko
+task: transcribe
 beta: 0.1
 calibration_weight: 0.05
 length_normalization: average

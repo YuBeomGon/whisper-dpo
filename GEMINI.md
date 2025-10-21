@@ -45,7 +45,7 @@ repo/
 │   │   └─ features.py            # WhisperProcessor로 mel/input_features
 │   ├─ dataset/
 │   │   ├─ build_triplets.py      # chosen/rejected 자동 구축 파이프라인
-│   │   └─ collator_whisper.py    # 오디오 seq2seq용 콜레이터
+│   │   └─ collator_dpo.py        # 오디오 seq2seq용 DPO 콜레이터
 │   ├─ modeling/
 │   │   ├─ dpo_trainer_whisper.py # TRL 상속 compute_loss 커스텀(바닐라 DPO)
 │   │   ├─ losses.py              # Cal‑DPO 앵커, 길이 정규화 옵션
@@ -169,7 +169,7 @@ python -m src.dataset.build_triplets \
 * **왜 Collator만으로는 부족한가?** TRL 기본 DPO는 텍스트 입력을 전제로 합니다. Whisper는 **오디오 멜스펙(`input_features`) + 텍스트 라벨(teacher-forcing)** 조합이라, **정책/레퍼런스 × (chosen/rejected)** 로그우도를 직접 계산하도록 `compute_loss`를 커스터마이즈해야 합니다.
 * **우리가 커스터마이즈할 부분**
 
-  1. `src/dataset/collator_whisper.py` : `input_features`, `labels_pos`, `labels_neg` 생성(패딩/마스킹 포함)
+  1. `src/dataset/collator_dpo.py` : `input_features`, `labels_pos`, `labels_neg` 생성(패딩/마스킹 포함)
   2. `src/modeling/dpo_trainer_whisper.py` : `class WhisperDPOTrainer(DPOTrainer)`에서 **길이 정규화 포함 로그우도** 계산 → **DPO 로스** 구성 (+옵션 **Cal-anchor 항**)
   3. `src/modeling/losses.py` : 길이 정규화/앵커 등 보조 항 구현
 * **언제 fork 고려? (희소)** 배치 스키마 대수정(다중 negative 내장), 레퍼런스 모델 샤딩/앙상블을 트레이너 레벨에 녹여야 할 때 등.
@@ -177,7 +177,7 @@ python -m src.dataset.build_triplets \
 **스켈레톤(요지)**
 
 ```python
-# src/dataset/collator_whisper.py
+# src/dataset/collator_dpo.py
 class WhisperDPOCollator:
     def __init__(self, processor): self.p = processor
     def __call__(self, batch):
@@ -342,20 +342,34 @@ fpm_ns = non_speech_tokens / (non_speech_minutes + 1e-8)
 
 ---
 
-### 5.4 Baseline vs DPO 비교
+### 5.4 Baseline / SFT / DPO 비교
 
-- `scripts/eval_all.sh` (또는 `python -m src.eval.compare_models`)로 동일 JSONL을 사용해 **베이스라인 vs DPO** WER을 빠르게 비교할 수 있습니다.
+- `scripts/eval_all.sh` (또는 `python -m src.eval.compare_models`)로 동일 JSONL을 활용해 **베이스라인 ↔ SFT ↔ DPO** WER을 빠르게 비교할 수 있습니다.
 - 실행 예:
   ```bash
+  # 1) OpenAI 공개 체크포인트
   ./scripts/eval_all.sh \
     --data data/dpo_triplets/zeroth_test.jsonl \
     --baseline openai/whisper-tiny \
-    --model outputs/dpo/whisper_small_zeroth \
-    --language ko \
-    --task transcribe \
+    --model openai/whisper-tiny \
+    --samples 0 12
+
+  # 2) SFT 결과 (SFT vs 베이스라인)
+  ./scripts/eval_all.sh \
+    --data data/dpo_triplets/zeroth_test.jsonl \
+    --baseline openai/whisper-tiny \
+    --model outputs/sft/whisper_tiny_zeroth \
+    --samples 0 12
+
+  # 3) DPO 결과 (SFT 대비 추가 이득 확인)
+  ./scripts/eval_all.sh \
+    --data data/dpo_triplets/zeroth_test.jsonl \
+    --baseline outputs/sft/whisper_tiny_zeroth \
+    --model outputs/dpo/whisper_tiny_zeroth \
     --samples 0 12 42
   ```
-- 출력: 두 모델의 WER과 지정 샘플(ref/base/DPO) 전사 비교. `--limit`(평가 수 제한), `--device cuda:0`로 디바이스 고정 가능.
+- 출력: 모델별 WER과 지정 샘플(ref/base/SFT/DPO) 전사 비교. `--limit`(평가 수 제한), `--device cuda:0` 옵션으로 빠르게 스폿체크할 수 있습니다.
+- **SFT 학습 실행**: `./scripts/train_sft.sh --config configs/train_sft.yaml` (config에서 데이터 경로/하이퍼 수정).
 
 ---
 
