@@ -1,0 +1,22 @@
+#
+# Whisper Hallucination Suppression via DPO (for gemini-cli)
+#
+# CUDA 환경에 맞는 torch/torchaudio 버전은 별도로 설치해야 합니다.
+# 예: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+#
+transformers>=4.44
+datasets>=2.20
+accelerate>=0.33
+trl>=0.9
+peft>=0.11
+bitsandbytes
+jiwer>=3.0
+librosa>=0.10
+pydub>=0.25
+audiomentations>=0.36
+soundfile>=0.12
+webrtcvad-wheels
+numpy
+pandas
+hydra-core
+tqdm

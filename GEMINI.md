@@ -162,6 +162,67 @@ python -m src.dataset.build_triplets \
 
 ## 4. TRL + Whisper: DPO 학습 설계
 
+### 4.0 TRL 통합 원칙 & fork 가이드
+
+* **trl는 외부 의존성**으로 유지합니다(`requirements.txt`에 버전 핀). 레포 내부에는 trl 소스 코드를 두지 않습니다.
+* **fork 불필요(기본)**: 우리 레포에서 **`DPOTrainer`를 상속**하여 **`compute_loss`**만 오버라이드하고, **오디오 전용 Collator**로 배치를 제공합니다.
+* **왜 Collator만으로는 부족한가?** TRL 기본 DPO는 텍스트 입력을 전제로 합니다. Whisper는 **오디오 멜스펙(`input_features`) + 텍스트 라벨(teacher-forcing)** 조합이라, **정책/레퍼런스 × (chosen/rejected)** 로그우도를 직접 계산하도록 `compute_loss`를 커스터마이즈해야 합니다.
+* **우리가 커스터마이즈할 부분**
+
+  1. `src/dataset/collator_whisper.py` : `input_features`, `labels_pos`, `labels_neg` 생성(패딩/마스킹 포함)
+  2. `src/modeling/dpo_trainer_whisper.py` : `class WhisperDPOTrainer(DPOTrainer)`에서 **길이 정규화 포함 로그우도** 계산 → **DPO 로스** 구성 (+옵션 **Cal-anchor 항**)
+  3. `src/modeling/losses.py` : 길이 정규화/앵커 등 보조 항 구현
+* **언제 fork 고려? (희소)** 배치 스키마 대수정(다중 negative 내장), 레퍼런스 모델 샤딩/앙상블을 트레이너 레벨에 녹여야 할 때 등.
+
+**스켈레톤(요지)**
+
+```python
+# src/dataset/collator_whisper.py
+class WhisperDPOCollator:
+    def __init__(self, processor): self.p = processor
+    def __call__(self, batch):
+        feats = self.p.feature_extractor([b["wav"] for b in batch], sampling_rate=16000,
+                                         return_tensors="pt", padding=True).input_features
+        def tok(texts):
+            ids = self.p.tokenizer(texts, return_tensors="pt", padding=True).input_ids
+            ids[ids == self.p.tokenizer.pad_token_id] = -100
+            return ids
+        return {"input_features": feats,
+                "labels_pos": tok([b["chosen"] for b in batch]),
+                "labels_neg": tok([b["rejected"] for b in batch])}
+
+# src/modeling/dpo_trainer_whisper.py
+from trl import DPOTrainer
+
+def seq_logprob(model, feats, labels):
+    out = model(input_features=feats, labels=labels)
+    logp = out.logits.log_softmax(-1)
+    m = labels != -100
+    tok_lp = logp[m, labels[m]]
+    lens = m.sum(dim=1).clamp(min=1)
+    return torch.stack(torch.split(tok_lp, lens.tolist())).mean(dim=1)  # 길이 정규화 평균
+
+class WhisperDPOTrainer(DPOTrainer):
+    def compute_loss(self, model, inputs, return_outputs=False):
+        x, yp, yn = inputs["input_features"], inputs["labels_pos"], inputs["labels_neg"]
+        lp_pos_pi, lp_neg_pi = seq_logprob(model, x, yp), seq_logprob(model, x, yn)
+        with torch.no_grad():
+            ref = self.ref_model
+            lp_pos_ref, lp_neg_ref = seq_logprob(ref, x, yp), seq_logprob(ref, x, yn)
+        logits = self.args.beta * ((lp_pos_pi - lp_neg_pi) - (lp_pos_ref - lp_neg_ref))
+        loss = -F.logsigmoid(logits).mean()
+        if getattr(self.args, "cal_anchor_gamma", 0.0) > 0:  # Cal-style anchor(옵션)
+            loss = loss + self.args.cal_anchor_gamma * torch.relu(lp_pos_ref - lp_pos_pi).mean()
+        return (loss, None) if return_outputs else loss
+```
+
+**체크리스트**
+
+* [ ] `requirements.txt`에 `trl` 버전 핀
+* [ ] Collator 키 이름 ↔ `compute_loss` 입력 키 일치
+* [ ] 4× fwd(정책/레퍼런스 × y⁺/y⁻) 메모리 대비: LoRA/gradient checkpointing/BF16
+* [ ] 삭제율·평균 출력 길이 모니터링(길이 바이어스 감시)
+
 ### 4.1 핵심 아이디어
 
 * TRL의 `DPOTrainer`를 **상속**하여 **`compute_loss`**만 오버라이드:
@@ -278,6 +339,23 @@ fpm_ns = non_speech_tokens / (non_speech_minutes + 1e-8)
 ```
 
 `scripts/eval_all.sh`: 표준셋 WER + 챌린지셋 HER/IR/DR/FPM‑NS 동시 출력
+
+---
+
+### 5.4 Baseline vs DPO 비교
+
+- `scripts/eval_all.sh` (또는 `python -m src.eval.compare_models`)로 동일 JSONL을 사용해 **베이스라인 vs DPO** WER을 빠르게 비교할 수 있습니다.
+- 실행 예:
+  ```bash
+  ./scripts/eval_all.sh \
+    --data data/dpo_triplets/zeroth_test.jsonl \
+    --baseline openai/whisper-tiny \
+    --model outputs/dpo/whisper_small_zeroth \
+    --language ko \
+    --task transcribe \
+    --samples 0 12 42
+  ```
+- 출력: 두 모델의 WER과 지정 샘플(ref/base/DPO) 전사 비교. `--limit`(평가 수 제한), `--device cuda:0`로 디바이스 고정 가능.
 
 ---
 
